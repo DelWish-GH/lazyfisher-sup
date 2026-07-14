@@ -13,20 +13,17 @@
         });
     };
 
-    // 註冊安全定時器
     function safeSetInterval(func, time) {
         const id = setInterval(func, time);
         cleanupTasks.push(() => clearInterval(id));
         return id;
     }
 
-    // 註冊安全事件監聽
     function safeAddEventListener(target, event, handler) {
         target.addEventListener(event, handler);
         cleanupTasks.push(() => target.removeEventListener(event, handler));
     }
 
-    // 註冊安全觀察者
     function safeObserve(observer, target, options) {
         observer.observe(target, options);
         cleanupTasks.push(() => observer.disconnect());
@@ -58,7 +55,7 @@
             const res = await fetch(JSON_URL + '?t=' + Date.now());
             const data = await res.json();
             FISH_DATABASE = data.content || data || [];
-            console.log('✅ 雲端端圖鑑已載入，共', FISH_DATABASE.length, '筆資料');
+            console.log('✅ 雲端圖鑑已載入，共', FISH_DATABASE.length, '筆資料');
         } catch (e) { console.log('⚠️ 圖鑑載入失敗', e); }
     }
 
@@ -97,7 +94,7 @@
     }
 
     // ============================================================
-    //  核心功能 B：魚類排續、標籤注入、船釣排序 (極速優化版)
+    //  核心功能 B：魚類排續、標籤注入、船釣排序
     // ============================================================
     function runLogic() {
         const list = document.querySelector('.card-list');
@@ -641,6 +638,888 @@
     }
 
     // ============================================================
+    //  增強模組 8：數據採集器 (僅電腦端啟動)
+    // ============================================================
+    function initDataCrawler() {
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 800;
+        if (isMobile) {
+            console.log('📱 偵測為行動裝置，數據採集器已停用。');
+            return;
+        }
+
+        console.log('💻 偵測為桌面裝置，啟動數據採集器模組。');
+
+        let isPaused = false;
+        let isAborted = false;
+
+        const routeMap = {
+            'fishing': '🎣 釣魚介面', 'keep': '🐟 魚獲管理', 'region': '🗺️ 釣場資訊',
+            'equipment': '⚔️ 裝備配置', 'inventory': '🎒 背包物品', 'shop': '💰 商店裝備',
+            'messages': '💬 系統消息', 'guild': '🏛️ 協會任務', 'dex': '📖 魚類圖鑑',
+            'achievements': '🏆 成就系統', 'rankings': '📊 排行榜', 'profile': '👤 個人檔案', 'help': '❓ 幫助說明'
+        };
+
+        const panel = document.createElement('div');
+        panel.id = 'lazyfisher-crawler-panel';
+        panel.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;background:rgba(0,0,0,0.85);padding:15px;border-radius:15px;box-shadow:0 4px 15px rgba(0,0,0,0.5);width:170px;border:1px solid #444;';
+        document.body.appendChild(panel);
+        cleanupTasks.push(() => {
+            const el = document.getElementById('lazyfisher-crawler-panel');
+            if(el) el.remove();
+        });
+
+        const statusText = document.createElement('div');
+        statusText.style.cssText = 'color:#4caf50;font-size:12px;font-weight:bold;margin-bottom:5px;text-align:center;';
+        statusText.innerText = '📡 待機中';
+        panel.appendChild(statusText);
+
+        function createBtn(text, color, onClick) {
+            const b = document.createElement('button');
+            b.innerText = text;
+            b.style.cssText = `padding:10px;background:${color};color:white;border:none;border-radius:8px;cursor:pointer;font-weight:bold;font-size:12px;`;
+            safeAddEventListener(b, 'click', onClick);
+            panel.appendChild(b);
+            return b;
+        }
+
+        const startBtn = createBtn('🚀 開始採集', '#4caf50', () => handleAction('start'));
+        const pauseBtn = createBtn('⏸️ 暫停', '#ff9800', () => handleAction('pause'));
+        const abortBtn = createBtn('🛑 中止並導出', '#f44336', () => handleAction('abort'));
+        pauseBtn.style.display = 'none';
+        abortBtn.style.display = 'none';
+
+        function getActiveRoute() {
+            const path = window.location.hash || window.location.pathname;
+            for (let key in routeMap) { if (path.includes(key)) return { key, name: routeMap[key] }; }
+            return { key: 'unknown', name: '未知區域' };
+        }
+
+        function refreshUI() {
+            const route = getActiveRoute();
+            startBtn.innerText = `🚀 採集 ${route.name}`;
+            startBtn.style.display = (route.key === 'unknown' || pauseBtn.style.display === 'block') ? 'none' : 'block';
+        }
+
+        const hashHandler = () => refreshUI();
+        safeAddEventListener(window, 'hashchange', hashHandler);
+        safeAddEventListener(window, 'popstate', hashHandler);
+        
+        const originalPushState = history.pushState;
+        history.pushState = function() { originalPushState.apply(this, arguments); refreshUI(); };
+        cleanupTasks.push(() => { history.pushState = originalPushState; });
+
+        async function handleAction(type) {
+            const route = getActiveRoute();
+            if (type === 'start') {
+                isAborted = false; isPaused = false;
+                startBtn.style.display = 'none'; pauseBtn.style.display = 'block'; abortBtn.style.display = 'block';
+                await runCrawl(route);
+            } else if (type === 'pause') {
+                isPaused = !isPaused;
+                pauseBtn.innerText = isPaused ? '▶️ 繼續' : '⏸️ 暫停';
+                statusText.innerText = isPaused ? '⏸️ 已暫停' : '📡 執行中...';
+            } else if (type === 'abort') {
+                isAborted = true;
+                statusText.innerText = '🛑 正在中止...';
+            }
+        }
+
+        async function runCrawl(route) {
+            let results = [];
+            let data = { page: route.name, url: window.location.href, timestamp: new Date().toLocaleString(), content: null };
+
+            const checkStatus = async () => {
+                if (isAborted) throw new Error('ABORT');
+                while (isPaused) {
+                    await new Promise(r => setTimeout(r, 500));
+                    if (isAborted) throw new Error('ABORT');
+                }
+            };
+
+            try {
+                switch (route.key) {
+                    case 'fishing':
+                        data.content = {
+                            daily_target: {
+                                fish: document.querySelector('.card strong:nth-child(1)')?.innerText,
+                                location: document.querySelector('.card .inline-meta:nth-child(2)')?.innerText,
+                                status: document.querySelector('.card .text-success')?.innerText || '未完成'
+                            },
+                            current_status: {
+                                area: document.querySelector('.fishing-overview-item:nth-child(1) strong')?.innerText,
+                                spot: document.querySelector('.fishing-overview-item:nth-child(2) strong')?.innerText,
+                                keep_limit: document.querySelector('.fishing-overview-item:nth-child(3) strong')?.innerText,
+                                game_time: document.querySelector('.fishing-overview-item:nth-child(4) strong')?.innerText
+                            },
+                            environment: {
+                                wind: document.querySelector('span[title^="风"]')?.innerText,
+                                cloud: document.querySelector('span[title^="云"]')?.innerText,
+                                rain: document.querySelector('span[title^="雨"]')?.innerText
+                            },
+                            last_catch: document.querySelector('.alert-success .text-sm')?.innerText
+                        };
+                        break;
+
+                    case 'keep':
+                        const fishCards = document.querySelectorAll('.item-card');
+                        for (let i = 0; i < fishCards.length; i++) {
+                            await checkStatus();
+                            statusText.innerText = `🔄 進度: ${i + 1}/${fishCards.length}`;
+                            let card = fishCards[i];
+                            card.scrollIntoView({ behavior: 'auto', block: 'center' });
+                            card.click();
+                            await new Promise(r => setTimeout(r, 600));
+                            const modal = document.querySelector('.modal-content');
+                            if (modal) {
+                                const getByLabel = (label) => {
+                                    const stats = Array.from(modal.querySelectorAll('.detail-stat'));
+                                    const target = stats.find(s => s.querySelector('.detail-stat-label')?.innerText.includes(label));
+                                    return target ? target.querySelector('.detail-stat-value')?.innerText.trim() : '未知';
+                                };
+                                results.push({
+                                    name: modal.querySelector('.modal-title')?.innerText,
+                                    rating: getByLabel('评级'), score: getByLabel('评分'),
+                                    size: getByLabel('体长'), weight: getByLabel('重量'),
+                                    location: getByLabel('钓获位置'), time: getByLabel('钓获时间'),
+                                    params: getByLabel('作钓参数'),
+                                    sell_price: modal.querySelector('.currency-item[title="金钱"]')?.innerText.trim() || getByLabel('售出价值'),
+                                    release_exp: getByLabel('放生收益')
+                                });
+                            }
+                            document.querySelector('.modal-close')?.click();
+                            await new Promise(r => setTimeout(r, 300));
+                        }
+                        data.content = results;
+                        break;
+
+                    case 'equipment':
+                        let activeEquip = {
+                            loadout_name: document.querySelector('.equipment-loadout-tab.tab-active')?.innerText.trim(),
+                            tension_summary: document.querySelector('.equipment-tension-summary')?.innerText.replace(/\n/g, ' | '),
+                            controls: document.querySelector('.loadout-control-summary')?.innerText,
+                            summary_stats: {},
+                            import_export_config: null,
+                            details: []
+                        };
+
+                        const summaryBlocks = document.querySelectorAll('.equipment-selection-summary-block');
+                        summaryBlocks.forEach(block => {
+                            const label = block.querySelector('.text-sm.text-muted')?.innerText.trim();
+                            const val = block.querySelector('.equipment-selection-summary-value')?.innerText.trim();
+                            if (label && val) {
+                                activeEquip.summary_stats[label] = val;
+                            }
+                        });
+
+                        const importExportBtn = Array.from(document.querySelectorAll('.page-wrapper button, .main-content button'))
+                                                     .find(b => b.innerText.includes('导入导出'));
+                        if (importExportBtn) {
+                            importExportBtn.click();
+                            await new Promise(r => setTimeout(r, 600)); 
+
+                            const modalTextarea = document.querySelector('.modal-content textarea, .q-dialog textarea, textarea');
+                            if (modalTextarea && modalTextarea.value) {
+                                try {
+                                    activeEquip.import_export_config = JSON.parse(modalTextarea.value);
+                                } catch (e) {
+                                    activeEquip.import_export_config = modalTextarea.value.trim();
+                                }
+                            }
+
+                            const closeBtn = document.querySelector('.modal-close, .q-btn.close-btn') || document.querySelector('.q-dialog__backdrop');
+                            if (closeBtn) closeBtn.click();
+                            await new Promise(r => setTimeout(r, 300));
+                        }
+
+                        const activeSlots = document.querySelectorAll('.loadout-slot');
+                        for (let slot of activeSlots) {
+                            await checkStatus();
+                            const label = slot.querySelector('.loadout-slot-label')?.innerText;
+                            const slotName = slot.querySelector('.loadout-slot-name')?.innerText;
+                            const detailBtn = slot.querySelector('.loadout-slot-action');
+                            if (detailBtn) {
+                                detailBtn.click();
+                                await new Promise(r => setTimeout(r, 600));
+                                const modal = document.querySelector('.modal-content, .q-dialog');
+                                if (modal) {
+                                    let itemStats = { slot: label, name: slotName, attributes: {} };
+                                    modal.querySelectorAll('.detail-stat').forEach(node => {
+                                        const l = node.querySelector('.detail-stat-label')?.innerText.trim();
+                                        const v = node.querySelector('.detail-stat-value')?.innerText.trim();
+                                        if (l && v) itemStats.attributes[l] = v;
+                                    });
+                                    activeEquip.details.push(itemStats);
+                                }
+                                (document.querySelector('.modal-close, .q-btn.close-btn') || document.querySelector('.q-dialog__backdrop'))?.click();
+                                await new Promise(r => setTimeout(r, 300));
+                            }
+                        }
+                        data.content = activeEquip;
+                        break;
+
+                    case 'inventory':
+                        let invResults = [];
+                        const invCards = document.querySelectorAll('.page-wrapper .shop-grid-card, .page-wrapper .item-card, .page-wrapper .q-card.cursor-pointer');
+                        if(invCards.length === 0) { statusText.innerText = "❌ 找不到物品"; break; }
+
+                        for (let i = 0; i < invCards.length; i++) {
+                            await checkStatus();
+                            let card = invCards[i];
+                            let cardText = card.innerText || "";
+                            if (cardText.includes('服饰') || cardText.includes('家具')) {
+                                console.log(`⏩ 跳過背包非必要物品:`, cardText.split('\n')[0]);
+                                continue;
+                            }
+
+                            statusText.innerText = `🎒 進度: ${i+1}/${invCards.length}`;
+                            card.scrollIntoView({ behavior: 'auto', block: 'center' });
+                            await new Promise(r => setTimeout(r, 200));
+                            card.click();
+                            await new Promise(r => setTimeout(r, 600));
+
+                            const modal = document.querySelector('.modal-content, .q-dialog');
+                            if (modal) {
+                                let itemDetail = { name: modal.querySelector('.modal-title, .text-h6')?.innerText, attributes: {} };
+                                const priceLabel = modal.querySelector('.currency-display');
+                                if(priceLabel) itemDetail.attributes['价格'] = priceLabel.innerText.trim();
+                                modal.querySelectorAll('.detail-stat').forEach(node => {
+                                    const l = node.querySelector('.detail-stat-label')?.innerText.trim();
+                                    const v = node.querySelector('.detail-stat-value')?.innerText.trim();
+                                    if (l) itemDetail.attributes[l] = v;
+                                });
+                                invResults.push(itemDetail);
+                            }
+                            const closeBtn = document.querySelector('.modal-close, .q-btn.close-btn') || document.querySelector('.q-dialog__backdrop');
+                            if (closeBtn) closeBtn.click();
+                            await new Promise(r => setTimeout(r, 300));
+                        }
+                        data.content = invResults;
+                        break;
+
+                    case 'shop':
+                        let shopResults = [];
+                        let scrapedItemNames = new Set(); 
+
+                        const scrapeCurrentCards = async () => {
+                            const itemCards = document.querySelectorAll('.page-wrapper .shop-grid-card, .page-wrapper .item-card, .page-wrapper .q-card.cursor-pointer');
+                            if (itemCards.length === 0) return;
+                            for (let i = 0; i < itemCards.length; i++) {
+                                await checkStatus();
+                                let card = itemCards[i];
+                                let itemNameNode = card.querySelector('.item-name, .text-subtitle2');
+                                let itemName = itemNameNode ? itemNameNode.innerText.trim() : `item_${Math.random()}`;
+
+                                if (scrapedItemNames.has(itemName)) continue;
+
+                                statusText.innerText = `🛒 抓取: ${itemName.substring(0, 8)}...`;
+                                card.scrollIntoView({ behavior: 'auto', block: 'center' });
+                                await new Promise(r => setTimeout(r, 200));
+                                card.click();
+                                await new Promise(r => setTimeout(r, 600));
+
+                                const modal = document.querySelector('.modal-content, .q-dialog');
+                                if (modal) {
+                                    let itemDetail = { name: modal.querySelector('.modal-title, .text-h6')?.innerText, attributes: {} };
+                                    const priceLabel = modal.querySelector('.currency-display');
+                                    if(priceLabel) itemDetail.attributes['价格'] = priceLabel.innerText.trim();
+                                    modal.querySelectorAll('.detail-stat').forEach(node => {
+                                        const l = node.querySelector('.detail-stat-label')?.innerText.trim();
+                                        const v = node.querySelector('.detail-stat-value')?.innerText.trim();
+                                        if (l) itemDetail.attributes[l] = v;
+                                    });
+                                    shopResults.push(itemDetail);
+                                    if (itemDetail.name) scrapedItemNames.add(itemDetail.name);
+                                }
+                                const closeBtn = document.querySelector('.modal-close, .q-btn.close-btn') || document.querySelector('.q-dialog__backdrop');
+                                if (closeBtn) closeBtn.click();
+                                await new Promise(r => setTimeout(r, 300));
+                            }
+                        };
+
+                        const getTabRows = () => document.querySelectorAll('.page-wrapper .scroll-row');
+
+                        let row1Tabs = getTabRows()[0]?.querySelectorAll('.tab, button, .q-chip');
+                        if (!row1Tabs || row1Tabs.length === 0) {
+                            await scrapeCurrentCards();
+                        } else {
+                            for (let i = 0; i < row1Tabs.length; i++) {
+                                await checkStatus();
+                                let currentR1Tabs = getTabRows()[0]?.querySelectorAll('.tab, button, .q-chip');
+                                if (i >= currentR1Tabs.length) break;
+                                let tab1 = currentR1Tabs[i];
+                                let tab1Name = tab1.innerText.trim();
+
+                                if (['收藏', '服饰', '家具'].includes(tab1Name)) {
+                                    console.log(`⏩ 跳過主分類: ${tab1Name}`);
+                                    continue;
+                                }
+
+                                statusText.innerText = `🛒 切換: ${tab1Name}`;
+                                tab1.scrollIntoView({ behavior: 'auto', block: 'center' });
+                                tab1.click();
+                                await new Promise(r => setTimeout(r, 1000)); 
+
+                                let row2Tabs = getTabRows()[1]?.querySelectorAll('.tab, button, .q-chip');
+                                if (!row2Tabs || row2Tabs.length === 0) {
+                                    await scrapeCurrentCards(); 
+                                    continue;
+                                }
+
+                                for (let j = 0; j < row2Tabs.length; j++) {
+                                    await checkStatus();
+                                    let currentR2Tabs = getTabRows()[1]?.querySelectorAll('.tab, button, .q-chip');
+                                    if (j >= currentR2Tabs.length) break;
+                                    let tab2 = currentR2Tabs[j];
+                                    let tab2Name = tab2.innerText.trim();
+
+                                    statusText.innerText = `🛒 切換: ${tab2Name}`;
+                                    tab2.scrollIntoView({ behavior: 'auto', block: 'center' });
+                                    tab2.click();
+                                    await new Promise(r => setTimeout(r, 1000));
+
+                                    let row3Tabs = getTabRows()[2]?.querySelectorAll('.tab, button, .q-chip');
+                                    if (!row3Tabs || row3Tabs.length === 0) {
+                                        await scrapeCurrentCards(); 
+                                        continue;
+                                    }
+
+                                    let hasAllTab = Array.from(row3Tabs).find(t => t.innerText.trim() === '全部');
+                                    if (hasAllTab) {
+                                        statusText.innerText = `🛒 切換: ${tab2Name} > 全部`;
+                                        hasAllTab.scrollIntoView({ behavior: 'auto', block: 'center' });
+                                        hasAllTab.click();
+                                        await new Promise(r => setTimeout(r, 1000));
+                                        await scrapeCurrentCards();
+                                    } else {
+                                        for (let k = 0; k < row3Tabs.length; k++) {
+                                            await checkStatus();
+                                            let currentR3Tabs = getTabRows()[2]?.querySelectorAll('.tab, button, .q-chip');
+                                            if (k >= currentR3Tabs.length) break;
+                                            let tab3 = currentR3Tabs[k];
+                                            let tab3Name = tab3.innerText.trim();
+
+                                            statusText.innerText = `🛒 切換: ${tab3Name}`;
+                                            tab3.scrollIntoView({ behavior: 'auto', block: 'center' });
+                                            tab3.click();
+                                            await new Promise(r => setTimeout(r, 1000));
+                                            await scrapeCurrentCards();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        data.content = shopResults;
+                        break;
+
+                    case 'guild':
+                        let guildTasksArr = [];
+                        const guildTabs = Array.from(document.querySelectorAll('.q-btn, button')).filter(btn =>
+                            ['每日委托', '高难挑战', '每日委託', '高難挑戰'].includes(btn.innerText.trim())
+                        );
+
+                        for (let tab of guildTabs) {
+                            tab.click();
+                            await new Promise(r => setTimeout(r, 1000)); 
+
+                            const taskCards = document.querySelectorAll('.license-card');
+                            statusText.innerText = `🔍 抓取: ${tab.innerText.trim()} (${taskCards.length})`;
+
+                            for (let card of taskCards) {
+                                await checkStatus();
+                                let name = card.querySelector('.license-name')?.innerText.trim();
+                                let desc = card.querySelector('.license-desc')?.innerText.trim();
+                                let rewardPrice = card.querySelector('.license-meta-grid > span:nth-child(1) .currency-item')?.innerText.trim();
+                                let basePrice = card.querySelector('.license-meta-grid > span:nth-child(2) .currency-item')?.innerText.trim();
+                                let progress = card.querySelector('.task-progress-label > span:last-child')?.innerText.trim();
+                                let isCompleted = card.classList.contains('owned');
+
+                                guildTasksArr.push({
+                                    category: tab.innerText.trim(), 
+                                    fish_name: name,
+                                    description: desc,
+                                    reward_price: rewardPrice,
+                                    base_unit_price: basePrice,
+                                    progress: progress,
+                                    status: isCompleted ? '已交付' : '未完成'
+                                });
+                            }
+                        }
+                        data.content = guildTasksArr;
+                        break;
+
+                    case 'profile':
+                        let profileData = {};
+                        statusText.innerText = '🔍 讀取個人檔案...';
+                        const profileInfo = document.querySelector('.profile-info');
+                        if (profileInfo) {
+                            profileData.name = profileInfo.querySelector('h3')?.innerText.trim();
+                            const metas = profileInfo.querySelectorAll('.inline-meta');
+                            profileData.level = metas[0]?.innerText.trim();
+                            profileData.exp = metas[1]?.innerText.trim();
+                            profileData.gold = profileInfo.querySelector('.currency-item[title="金钱"]')?.innerText.trim();
+                            profileData.diamonds = profileInfo.querySelector('.currency-item[title="钻石"]')?.innerText.trim();
+                            const progTexts = profileInfo.querySelectorAll('.profile-level-progress-text span');
+                            if (progTexts.length >= 2) { profileData.level_progress = progTexts[0]?.innerText.trim(); profileData.level_remaining = progTexts[1]?.innerText.trim(); }
+                        }
+                        let skills = [];
+                        document.querySelectorAll('.skill-card').forEach(card => {
+                            skills.push({ skill_name: card.querySelector('.skill-card-content span:first-child')?.innerText.trim(), skill_meta: card.querySelector('.skill-card-content .inline-meta')?.innerText.trim(), progress: card.querySelector('.skill-card-progress-text')?.innerText.trim() });
+                        });
+                        profileData.skills = skills;
+                        data.content = profileData;
+                        break;
+
+                    case 'region':
+                        let regionData = [];
+
+                        const scrapeRegionModal = async (tabName) => {
+                            const modal = document.querySelector('.modal-content');
+                            if (modal) {
+                                const title = modal.querySelector('.modal-title')?.innerText;
+                                let detailStats = {};
+                                modal.querySelectorAll('.detail-stat').forEach(n => {
+                                    const l = n.querySelector('.detail-stat-label')?.innerText.trim();
+                                    const v = n.querySelector('.detail-stat-value')?.innerText.trim();
+                                    if(l && v) detailStats[l] = v;
+                                });
+
+                                let spots = [];
+                                const spotTabs = modal.querySelectorAll('.tab');
+                                for (let spotTab of spotTabs) {
+                                    spotTab.click();
+                                    await new Promise(r => setTimeout(r, 400));
+                                    const spotInfoText = modal.querySelector('.text-sm.text-muted.mt-sm')?.innerText || '';
+                                    spots.push({
+                                        spot_name: spotTab.innerText.trim(),
+                                        depth_bias: spotInfoText.match(/深偏\s*([\d.]+)/)?.[1],
+                                        snag_risk: spotInfoText.match(/挂底风险\s*([\d%]+)/)?.[1]
+                                    });
+                                }
+
+                                let fishes = [];
+                                const fishCards = modal.querySelectorAll('.region-fish-card');
+                                fishCards.forEach(fc => {
+                                    const fishName = fc.querySelector('.item-name')?.innerText.trim();
+                                    const mutedTexts = fc.querySelectorAll('.text-xs.text-muted');
+                                    let rarity = '未知'; let weightRange = '未知';
+                                    if (mutedTexts.length >= 2) {
+                                        rarity = mutedTexts[0].innerText.trim();
+                                        weightRange = mutedTexts[1].innerText.trim();
+                                    } else if (mutedTexts.length === 1) {
+                                        weightRange = mutedTexts[0].innerText.trim();
+                                    }
+                                    fishes.push({ name: fishName, rarity: rarity, weight_range: weightRange });
+                                });
+                                regionData.push({ type: tabName, region_name: title, environment: detailStats, spots: spots, fish_list: fishes });
+                            }
+                            document.querySelector('.modal-close')?.click();
+                            await new Promise(r => setTimeout(r, 400));
+                        };
+
+                        const regionTabs = Array.from(document.querySelectorAll('.scroll-row.mb-md .tab'))
+                                                .filter(t => t.innerText.includes('岸钓') || t.innerText.includes('船钓'));
+
+                        if (regionTabs.length === 0) {
+                            statusText.innerText = "❌ 找不到岸釣/船釣標籤";
+                            break;
+                        }
+
+                        for (let tab of regionTabs) {
+                            await checkStatus();
+                            let tabName = tab.innerText.trim();
+                            statusText.innerText = `🗺️ 切換: ${tabName}`;
+
+                            tab.scrollIntoView({ behavior: 'auto', block: 'center' });
+                            tab.click();
+                            await new Promise(r => setTimeout(r, 1200)); 
+
+                            if (tabName.includes('岸钓')) {
+                                const clickHelper = (elem) => {
+                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                        elem.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                                    });
+                                };
+
+                                const regionItems = document.querySelectorAll('.region-list-item');
+                                for (let i = 0; i < regionItems.length; i++) {
+                                    await checkStatus();
+                                    let currentItems = document.querySelectorAll('.region-list-item');
+                                    if (i >= currentItems.length) break;
+                                    let item = currentItems[i];
+
+                                    if (!item) continue;
+
+                                    let targetName = item.querySelector('.list-item-title')?.textContent.trim() || `釣場 ${i+1}`;
+                                    statusText.innerText = `🗺️ ${tabName}: ${i+1}/${currentItems.length}`;
+
+                                    item.scrollIntoView({ behavior: 'auto', block: 'center' });
+                                    await new Promise(r => setTimeout(r, 400));
+
+                                    clickHelper(item);
+
+                                    let modalAppeared = false;
+                                    for(let w = 0; w < 10; w++) {
+                                        if(document.querySelector('.modal-content, .q-dialog')) {
+                                            modalAppeared = true;
+                                            break;
+                                        }
+                                        await new Promise(r => setTimeout(r, 300));
+                                    }
+
+                                    if(modalAppeared) {
+                                        await new Promise(r => setTimeout(r, 600)); 
+                                        await scrapeRegionModal(tabName);
+                                    } else {
+                                        console.error(`❌ 無法打開釣場詳情: ${targetName}`);
+                                    }
+                                }
+                            } else if (tabName.includes('船钓')) {
+                                let selectBox = null;
+                                statusText.innerText = "⏳ 等待船釣介面...";
+
+                                for(let wait = 0; wait < 10; wait++) {
+                                    selectBox = document.querySelector('.q-select, select, .q-field, .q-field--select, [role="combobox"]');
+                                    if (selectBox && selectBox.getBoundingClientRect().width > 0) break;
+                                    await new Promise(r => setTimeout(r, 500));
+                                }
+
+                                if (!selectBox) {
+                                    statusText.innerText = `❌ 找不到船釣選單`;
+                                    continue;
+                                }
+
+                                selectBox.click();
+                                await new Promise(r => setTimeout(r, 1000));
+
+                                let initialOptions = document.querySelectorAll('.q-menu .q-item, .q-popover .q-item, option');
+                                let optionCount = initialOptions.length;
+
+                                document.body.click();
+                                while(document.querySelector('.q-menu')) await new Promise(r => setTimeout(r, 200));
+
+                                for (let i = 0; i < optionCount; i++) {
+                                    await checkStatus();
+                                    statusText.innerText = `🗺️ 船釣進度: ${i + 1}/${optionCount}`;
+
+                                    let currentSelect = document.querySelector('.q-select, select, .q-field, .q-field--select, [role="combobox"]');
+                                    if (!currentSelect) break;
+
+                                    currentSelect.click();
+                                    await new Promise(r => setTimeout(r, 800));
+
+                                    let options = document.querySelectorAll('.q-menu .q-item, .q-popover .q-item, option');
+                                    if (i >= options.length) { document.body.click(); break; }
+
+                                    let targetOption = options[i];
+                                    let targetName = targetOption.textContent.trim();
+
+                                    if (targetOption.classList.contains('disabled') || targetName.includes('锁') || targetName.includes('需要') || targetOption.disabled) {
+                                        console.log(`🚫 跳過鎖定航線: ${targetName}`);
+                                        document.body.click();
+                                        while(document.querySelector('.q-menu')) await new Promise(r => setTimeout(r, 200));
+                                        continue;
+                                    }
+
+                                    if(targetOption.tagName === 'OPTION') {
+                                        currentSelect.value = targetOption.value;
+                                        currentSelect.dispatchEvent(new Event('change', {bubbles: true}));
+                                    } else {
+                                        targetOption.click();
+                                    }
+
+                                    while(document.querySelector('.q-menu')) await new Promise(r => setTimeout(r, 200));
+
+                                    statusText.innerText = `⏳ 等待 ${targetName.substring(0,5)}... 載入`;
+                                    await new Promise(r => setTimeout(r, 2500));
+
+                                    let viewBtns = Array.from(document.querySelectorAll('button')).filter(b =>
+                                        (b.textContent.includes('详情') || b.textContent.includes('查看')) &&
+                                        !b.classList.contains('modal-close') &&
+                                        b.getBoundingClientRect().width > 0 &&
+                                        b.getBoundingClientRect().height > 0
+                                    );
+
+                                    if (viewBtns.length > 0) {
+                                        let viewBtn = viewBtns[0]; 
+                                        if (!viewBtn.disabled) {
+                                            viewBtn.click();
+
+                                            let modalAppeared = false;
+                                            for(let w = 0; w < 10; w++) {
+                                                if(document.querySelector('.modal-content, .q-dialog')) {
+                                                    modalAppeared = true;
+                                                    break;
+                                                }
+                                                await new Promise(r => setTimeout(r, 300));
+                                            }
+
+                                            if(modalAppeared) {
+                                                await new Promise(r => setTimeout(r, 600)); 
+                                                await scrapeRegionModal(tabName);
+                                            } else {
+                                                console.error(`❌ 彈窗未出現: ${targetName}`);
+                                            }
+                                        }
+                                    } else {
+                                        console.error(`❌ 找不到 ${targetName} 的可見詳情按鈕`);
+                                    }
+                                }
+                            }
+                        } 
+                        data.content = regionData;
+                        break;
+
+                    case 'dex':
+                        await crawlDex();
+                        return;
+
+                    case 'help':
+                        let helpData = {};
+                        let mainTabSelectors = '.help-tabs .tab';
+
+                        const scrapeContentWithPagination = async (tabName) => {
+                            let fullContent = [];
+                            let hasNext = true;
+
+                            while (hasNext) {
+                                let contentContainer = document.querySelector('.help-formula-section-content') || document.querySelector('.help-content');
+                                if (contentContainer) {
+                                    fullContent.push(...parseHelpContent(contentContainer));
+                                }
+
+                                let allButtons = Array.from(document.querySelectorAll('button'));
+                                let nextBtn = allButtons.find(b =>
+                                    (b.innerText.includes('下一页') || b.innerText.includes('Next')) &&
+                                    !b.disabled &&
+                                    b.getBoundingClientRect().width > 0
+                                );
+
+                                if (nextBtn) {
+                                    statusText.innerText = `📖 解析: ${tabName} (翻頁中...)`;
+                                    nextBtn.click();
+                                    await new Promise(r => setTimeout(r, 1500)); 
+                                } else {
+                                    hasNext = false;
+                                }
+                            }
+                            return fullContent;
+                        };
+
+                        let mainTabs = document.querySelectorAll(mainTabSelectors);
+                        for (let i = 0; i < mainTabs.length; i++) {
+                            await checkStatus();
+                            let currentMainTabs = document.querySelectorAll(mainTabSelectors);
+                            let mainTab = currentMainTabs[i];
+                            let mainTabName = mainTab.innerText.trim();
+
+                            mainTab.scrollIntoView({ behavior: 'auto', block: 'center' });
+                            mainTab.click();
+                            await new Promise(r => setTimeout(r, 1000));
+
+                            helpData[mainTabName] = {};
+
+                            let subTabSelectors = '.help-formula-section-tabs .tab, .help-document-tabs .tab';
+                            let subTabs = document.querySelectorAll(subTabSelectors);
+
+                            if (subTabs.length > 0) {
+                                for (let j = 0; j < subTabs.length; j++) {
+                                    await checkStatus();
+                                    let currentSubTabs = document.querySelectorAll(subTabSelectors);
+                                    let subTab = currentSubTabs[j];
+                                    let subTabName = subTab.innerText.trim();
+
+                                    subTab.click();
+                                    await new Promise(r => setTimeout(r, 1000));
+
+                                    helpData[mainTabName][subTabName] = await scrapeContentWithPagination(subTabName);
+                                }
+                            } else {
+                                helpData[mainTabName]["內文"] = await scrapeContentWithPagination(mainTabName);
+                            }
+                        }
+                        data.content = helpData;
+                        break;
+
+                    default:
+                        data.content = document.querySelector('.page-wrapper, main')?.innerText.split('\n').filter(t => t.trim() !== '') || [];
+                }
+            } catch (e) {
+                if (e.message === 'ABORT') {
+                    console.log('🛑 採集已中止');
+                    statusText.innerText = '🛑 已中止';
+                } else {
+                    console.error("爬蟲錯誤:", e);
+                    statusText.innerText = '❌ 發生錯誤';
+                }
+            }
+
+            if(data.content && Object.keys(data.content).length > 0) {
+                download(data, route.key);
+            }
+            resetUI();
+        }
+
+        async function crawlDex() {
+            let fishList = [];
+            const cards = document.querySelectorAll('.fish-card');
+
+            const checkStatus = async () => {
+                if (isAborted) throw new Error('ABORT');
+                while (isPaused) {
+                    await new Promise(r => setTimeout(r, 500));
+                    if (isAborted) throw new Error('ABORT');
+                }
+            };
+
+            if (!confirm(`準備採集 ${cards.length} 種魚類...`)) return resetUI();
+
+            try {
+                for (let i = 0; i < cards.length; i++) {
+                    await checkStatus();
+                    statusText.innerText = `📖 圖鑑: ${i+1}/${cards.length}`;
+
+                    cards[i].scrollIntoView({ behavior: 'auto', block: 'center' });
+                    cards[i].click();
+
+                    await new Promise(r => setTimeout(r, 600)); 
+
+                    const modal = document.querySelector('.modal-content, .q-dialog');
+                    if (modal) {
+                        let fishData = {
+                            name: modal.querySelector('.modal-title, .text-h6')?.textContent.trim() || '未知',
+                            rarity: modal.querySelector('.inline-meta')?.textContent.trim() || '未知',
+                            scientific_name: modal.querySelector('.text-sm.text-muted')?.textContent.trim() || '',
+                            stats: {},
+                            details: {}
+                        };
+
+                        modal.querySelectorAll('.fish-stat-bar-row, .row').forEach(row => {
+                            let label = row.querySelector('.fish-stat-bar-label, .text-left')?.textContent.trim();
+                            let val = row.querySelector('.fish-stat-bar-value, .text-right')?.textContent.trim();
+                            if (label && val) {
+                                fishData.stats[label] = val;
+                            }
+                        });
+
+                        modal.querySelectorAll('.detail-stat, .q-item').forEach(stat => {
+                            let label = stat.querySelector('.detail-stat-label, .q-item__label--caption')?.textContent.trim();
+                            let val = stat.querySelector('.detail-stat-value, .q-item__label--body, .text-right')?.textContent.trim();
+
+                            if (label) label = label.replace(/[:：]$/, '').trim();
+
+                            if (label && val) {
+                                fishData.details[label] = val;
+                            }
+                        });
+
+                        fishList.push(fishData);
+                    }
+
+                    const closeBtn = document.querySelector('.modal-close, .q-btn.close-btn');
+                    if (closeBtn) closeBtn.click();
+
+                    await new Promise(r => setTimeout(r, 200));
+                }
+
+                download({ page: '魚類圖鑑', content: fishList }, 'dex');
+            } catch (e) {
+                if (e.message === 'ABORT') {
+                    console.log('🛑 圖鑑採集已中止');
+                    statusText.innerText = '🛑 已中止';
+                    if (fishList.length > 0) download({ page: '魚類圖鑑_未完成', content: fishList }, 'dex_partial');
+                } else {
+                    console.error("圖鑑採集錯誤:", e);
+                    statusText.innerText = '❌ 發生錯誤';
+                }
+            }
+
+            resetUI();
+        }
+
+        function parseHelpContent(container) {
+            let sections = [];
+            let currentSection = { title: '前言/概述', content: [] };
+
+            Array.from(container.children).forEach(node => {
+                if (/^H[1-6]$/.test(node.tagName)) {
+                    if (currentSection.content.length > 0 || currentSection.title !== '前言/概述') {
+                        sections.push(currentSection);
+                    }
+                    currentSection = { title: node.innerText.trim(), content: [] };
+                }
+                else if ((node.tagName === 'DIV' && node.classList.contains('help-table-wrap')) || node.tagName === 'TABLE') {
+                    let tableNode = node.tagName === 'TABLE' ? node : node.querySelector('table');
+                    if (tableNode) {
+                        let tableData = [];
+                        let headers = Array.from(tableNode.querySelectorAll('th')).map(th => extractTextOrLatex(th));
+                        if(headers.length > 0) tableData.push(headers);
+
+                        let rows = tableNode.querySelectorAll('tbody tr');
+                        rows.forEach(tr => {
+                            let rowData = Array.from(tr.querySelectorAll('td')).map(td => extractTextOrLatex(td));
+                            tableData.push(rowData);
+                        });
+                        currentSection.content.push({ type: 'table', data: tableData });
+                    }
+                }
+                else if (node.classList && node.classList.contains('katex-display')) {
+                    let annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+                    if (annotation && annotation.textContent) {
+                        currentSection.content.push(`$$ ${annotation.textContent.trim()} $$`);
+                    }
+                }
+                else if (['P', 'UL', 'OL', 'PRE', 'CODE'].includes(node.tagName)) {
+                    if (node.classList.contains('help-formula-section-picker') || node.classList.contains('help-document-picker')) return;
+                    let text = extractTextOrLatex(node);
+                    if (text) currentSection.content.push(text);
+                }
+            });
+
+            if (currentSection.content.length > 0) sections.push(currentSection);
+            return sections;
+        }
+
+        function extractTextOrLatex(node) {
+            let result = "";
+            node.childNodes.forEach(child => {
+                if (child.nodeType === Node.TEXT_NODE) {
+                    result += child.textContent;
+                } else if (child.nodeType === Node.ELEMENT_NODE) {
+                    if (child.classList.contains('katex')) {
+                        let annotation = child.querySelector('annotation[encoding="application/x-tex"]');
+                        if (annotation && annotation.textContent) {
+                            result += `$${annotation.textContent.trim()}$`;
+                        } else {
+                            result += child.textContent || "";
+                        }
+                    } else {
+                        result += extractTextOrLatex(child);
+                    }
+                }
+            });
+            return result.trim().replace(/\s+/g, ' ');
+        }
+
+        function download(data, name) {
+            if (!data.content || data.content.length === 0) return;
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            const timestamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0,19);
+            a.download = `LazyFisher_${name}_${timestamp}.json`;
+            a.click();
+        }
+
+        function resetUI() {
+            startBtn.style.display = 'block'; pauseBtn.style.display = 'none'; abortBtn.style.display = 'none';
+            pauseBtn.innerText = '⏸️ 暫停';
+            refreshUI();
+        }
+
+        refreshUI();
+    }
+
+    // ============================================================
     //  主程式執行入口
     // ============================================================
     async function boot() {
@@ -660,6 +1539,9 @@
         initCastOffsetDisplay();
         initLureActionSpeedHelper();
         initCompactRegionCards();
+        
+        // 🌟 新增：數據採集器 (內含行動裝置偵測)
+        initDataCrawler();
 
         console.log('✨ LazyFisher Payload 啟動完畢！熱更新就緒。');
     }
