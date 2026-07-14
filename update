@@ -1,0 +1,675 @@
+(async function() {
+    'use strict';
+
+    // ============================================================
+    //  熱更新垃圾回收機制 (Cleanup Tasks)
+    // ============================================================
+    const cleanupKey = 'LazyFisher_Core_' + Date.now();
+    const cleanupTasks = [];
+    window.lazyfisherCleanup = window.lazyfisherCleanup || {};
+    window.lazyfisherCleanup[cleanupKey] = function() {
+        cleanupTasks.forEach(fn => {
+            try { fn(); } catch(e) { console.error("Cleanup error:", e); }
+        });
+    };
+
+    // 註冊安全定時器
+    function safeSetInterval(func, time) {
+        const id = setInterval(func, time);
+        cleanupTasks.push(() => clearInterval(id));
+        return id;
+    }
+
+    // 註冊安全事件監聽
+    function safeAddEventListener(target, event, handler) {
+        target.addEventListener(event, handler);
+        cleanupTasks.push(() => target.removeEventListener(event, handler));
+    }
+
+    // 註冊安全觀察者
+    function safeObserve(observer, target, options) {
+        observer.observe(target, options);
+        cleanupTasks.push(() => observer.disconnect());
+    }
+
+    // ============================================================
+    //  全域變數與資料核心
+    // ============================================================
+    let FISH_DATABASE = [];
+    let IS_BAIT_MODE = false;
+    const JSON_URL = 'https://gist.githubusercontent.com/DelWish-GH/fb39d922fd11ef740e6505e987c8f040/raw/LazyFisher_Fish_DEX.json';
+
+    const BAIT_COLORS = {
+        '藻饵': '#2E7D32', '团虫饵': '#4E342E', '虫饵': '#8D6E63', '玉米': '#F9A825',
+        '谷物': '#FFB300', '草饵': '#558B2F', '昆虫': '#FF7043', '颗粒': '#5D4037',
+        '虾饵': '#E91E63', '螺肉': '#795548', '面饵': '#9C27B0', '活小鱼': '#0288D1',
+        '蟹饵': '#D32F2F', '贝类': '#9E9D24', '铅头钩': '#455A64', '亮片': '#FFD700',
+        '米诺': '#2E7D32', '摇滚': '#1565C0', '水面系': '#00695C'
+    };
+
+    const cleanName = (str) => {
+        if (!str) return '';
+        return str.replace(/[\u200B-\u200D\uFEFF\u00A0\s]/g, '')
+                  .replace(/茲/g, '兹').replace(/魚/g, '鱼').trim();
+    };
+
+    async function loadData() {
+        try {
+            const res = await fetch(JSON_URL + '?t=' + Date.now());
+            const data = await res.json();
+            FISH_DATABASE = data.content || data || [];
+            console.log('✅ 雲端端圖鑑已載入，共', FISH_DATABASE.length, '筆資料');
+        } catch (e) { console.log('⚠️ 圖鑑載入失敗', e); }
+    }
+
+    // ============================================================
+    //  核心功能 A：懸浮按鈕與切換開關
+    // ============================================================
+    function addFloatingButtons() {
+        if (document.getElementById('floating-scroll-btns')) return;
+        const div = document.createElement('div');
+        div.id = 'floating-scroll-btns';
+        div.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 5px;';
+
+        const createBtn = (text, onClick) => {
+            const btn = document.createElement('button');
+            btn.textContent = text;
+            btn.style.cssText = 'padding: 8px 10px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 11px;';
+            safeAddEventListener(btn, 'click', onClick);
+            return btn;
+        };
+
+        div.appendChild(createBtn('↑', () => window.scrollTo({ top: 0, behavior: 'smooth' })));
+        div.appendChild(createBtn('↓', () => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })));
+
+        const switchBtn = createBtn(IS_BAIT_MODE ? '餌:真' : '餌:擬', () => {
+            IS_BAIT_MODE = !IS_BAIT_MODE;
+            switchBtn.textContent = IS_BAIT_MODE ? '餌:真' : '餌:擬';
+            runLogic();
+        });
+        div.appendChild(switchBtn);
+        document.body.appendChild(div);
+        
+        cleanupTasks.push(() => {
+            const el = document.getElementById('floating-scroll-btns');
+            if(el) el.remove();
+        });
+    }
+
+    // ============================================================
+    //  核心功能 B：魚類排續、標籤注入、船釣排序 (極速優化版)
+    // ============================================================
+    function runLogic() {
+        const list = document.querySelector('.card-list');
+        if (list) {
+            const cards = Array.from(list.querySelectorAll('.card.item-card'));
+            const isB = (c) => c.querySelector('button')?.textContent.trim() === '上船' && !c.querySelector('button').disabled;
+            cards.sort((a, b) => isB(b) - isB(a));
+            cards.forEach(c => list.appendChild(c));
+        }
+
+        const grid = document.querySelector('.region-fish-grid');
+        if (!grid) return;
+        const cards = Array.from(grid.querySelectorAll('.region-fish-card'));
+
+        cards.forEach(card => {
+            if (!card.__sortData) {
+                const rawName = Array.from(card.querySelector('.item-name')?.childNodes || []).filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim();
+                const fishEntry = FISH_DATABASE.find(f => cleanName(f.name) === cleanName(rawName) || cleanName(f["名称"]) === cleanName(rawName));
+                const info = fishEntry?.details || fishEntry?.["详情"] || {};
+
+                if (!card.querySelector('.my-tag-container') && fishEntry) {
+                    const cont = document.createElement('div');
+                    cont.className = 'my-tag-container';
+                    cont.style.cssText = 'display:flex; flex-direction:column; align-items:center; margin-top:2px;';
+
+                    if (info['水层']) {
+                        const bg = info['水层']==='上层'?'#0D7BC9':info['水层']==='中层'?'#2E7D32':'#D84315';
+                        cont.innerHTML += `<div style="background:${bg}; color:white; padding:1px 8px; border-radius:3px; font-size:10px; margin-bottom:2px;">${info['水层']}</div>`;
+                    }
+                    if (info['偏好拟饵']) cont.innerHTML += `<div style="color:${BAIT_COLORS[info['偏好拟饵']] || '#22B14C'}; font-size:10px; font-weight:bold;">${info['偏好拟饵']}</div>`;
+                    if (info['偏好饵料']) cont.innerHTML += `<div style="color:${BAIT_COLORS[info['偏好饵料']] || '#00A2E8'}; font-size:10px; font-weight:bold;">${info['偏好饵料']}</div>`;
+
+                    const ref = card.querySelector('.text-xs.text-muted');
+                    if (ref) ref.parentNode.insertBefore(cont, ref);
+                }
+
+                let w = 0;
+                const weightStr = info['重量'] || info['最大重量'] || info['最小重量'] || '0g';
+                const matches = [...weightStr.matchAll(/([\d.]+)\s*(kg|g)/gi)];
+
+                if (matches.length > 0) {
+                    const lastMatch = matches[matches.length - 1];
+                    w = parseFloat(lastMatch[1]) || 0;
+                    if (lastMatch[2].toLowerCase() === 'kg') w *= 1000;
+                }
+
+                card.__sortData = {
+                    layer: info['水层'] || '', bait: info['偏好饵料'] || '',
+                    lure: info['偏好拟饵'] || '', w: w
+                };
+            }
+        });
+
+        cards.sort((a, b) => {
+            const lockedA = a.querySelector('.region-fish-lock-button')?.classList.contains('region-fish-lock-button--locked');
+            const lockedB = b.querySelector('.region-fish-lock-button')?.classList.contains('region-fish-lock-button--locked');
+            if (lockedA && !lockedB) return -1;
+            if (!lockedA && lockedB) return 1;
+
+            const dA = a.__sortData || { layer: '', bait: '', lure: '', w: 0 };
+            const dB = b.__sortData || { layer: '', bait: '', lure: '', w: 0 };
+
+            const order = { '上层': 1, '中层': 2, '下层': 3 };
+            if ((order[dA.layer]||9) !== (order[dB.layer]||9)) return (order[dA.layer]||9) - (order[dB.layer]||9);
+
+            const valA = IS_BAIT_MODE ? dA.bait : dA.lure;
+            const valB = IS_BAIT_MODE ? dB.bait : dB.lure;
+            if ((valA || '') !== (valB || '')) return (valA || '').localeCompare((valB || ''), 'zh-CN');
+
+            return dB.w - dA.w;
+        });
+
+        cards.forEach(c => grid.appendChild(c));
+    }
+
+    // ============================================================
+    //  增強模組 0：智能對比度適應 CSS 注入
+    // ============================================================
+    function initSmartContrastCurrency() {
+        if (!document.getElementById('smart-contrast-currency-style')) {
+            const style = document.createElement('style');
+            style.id = 'smart-contrast-currency-style';
+            style.textContent = `
+                .currency-display { background: none !important; border: none !important; padding: 0 !important; display: inline-flex; align-items: center; gap: 16px; }
+                .currency-item { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; mix-blend-mode: difference; color: #e5e5e5 !important; }
+                .currency-item svg { stroke: currentColor !important; }
+            `;
+            document.head.appendChild(style);
+            cleanupTasks.push(() => style.remove());
+        }
+    }
+
+    // ============================================================
+    //  增強模組 1：路亚软竿惩罚系数模块
+    // ============================================================
+    function initLureSoftnessModule() {
+        const CONFIG = { H_TARGETS: { 'bottom_hop': 7.2, 'mid_twitch': 8.0 }, PANEL_ID: 'rf4-lure-penalty-panel' };
+        function extractRodHardness() {
+            for (const title of document.querySelectorAll('.loadout-slot-title')) {
+                if (title.textContent.includes('鱼竿')) {
+                    const rodSlot = title.closest('.loadout-slot');
+                    if (!rodSlot) return null;
+                    for (const stat of rodSlot.querySelectorAll('.loadout-summary-stats span')) {
+                        if (stat.textContent.includes('硬度')) {
+                            const match = stat.textContent.match(/[\d.]+/);
+                            return match ? parseFloat(match[0]) : null;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+        function extractCurrentAction() {
+            const controlSummary = document.querySelector('.loadout-control-summary');
+            if (!controlSummary) return null;
+            for (const span of controlSummary.querySelectorAll('span')) {
+                const text = span.textContent.trim();
+                if (text.includes('底层跳动')) return 'bottom_hop';
+                if (text.includes('中层抽动')) return 'mid_twitch';
+            }
+            return null;
+        }
+        function calculatePenalty(action, hardness) {
+            if (!action || hardness === null || isNaN(hardness)) return null;
+            const hTarget = CONFIG.H_TARGETS[action];
+            if (hTarget <= 4.0 || hardness <= 4.0) return null;
+            const rhoSoft = Math.max(0, Math.min(1, (hTarget - hardness) / (hTarget - 4.0)));
+            return Math.max(0.65, Math.min(1.0, 1 - 0.35 * rhoSoft));
+        }
+        function getOrCreatePanel() {
+            let panel = document.getElementById(CONFIG.PANEL_ID);
+            if (panel) return panel;
+            const summaryNode = document.querySelector('.equipment-selection-summary');
+            if (!summaryNode) return null;
+            panel = document.createElement('div');
+            panel.id = CONFIG.PANEL_ID;
+            panel.className = 'equipment-selection-summary';
+            panel.innerHTML =
+                `<div class="equipment-selection-summary-block"><div class="text-sm text-muted">软竿惩罚</div><div class="equipment-selection-summary-value" id="rf4-gamma">--</div></div>
+                 <div class="equipment-selection-summary-block"><div class="text-sm text-muted">状态</div><div class="equipment-selection-summary-value" id="rf4-status">等待数据</div></div>`;
+            summaryNode.parentNode.insertBefore(panel, summaryNode.nextSibling);
+            return panel;
+        }
+        function updateUI(gamma) {
+            const panel = getOrCreatePanel();
+            if (!panel) return;
+            const valEl = document.getElementById('rf4-gamma');
+            const stEl = document.getElementById('rf4-status');
+            if (gamma === null) { panel.style.display = 'none'; return; }
+            panel.style.display = '';
+            valEl.textContent = gamma.toFixed(2); valEl.style.color = ''; stEl.style.color = '';
+            if (gamma === 1.0) { stEl.textContent = '无惩罚'; }
+            else if (gamma >= 0.8) { stEl.textContent = '轻微惩罚'; valEl.style.color = '#f0ad4e'; }
+            else if (gamma >= 0.65) { stEl.textContent = '严重惩罚'; valEl.style.color = '#d9534f'; }
+            else { stEl.textContent = '上限惩罚'; valEl.style.color = '#d9534f'; }
+        }
+        let lastAction = null, lastHardness = null;
+        function tick() {
+            const action = extractCurrentAction();
+            const hardness = extractRodHardness();
+            if (action !== lastAction || hardness !== lastHardness) {
+                lastAction = action; lastHardness = hardness;
+                updateUI(calculatePenalty(action, hardness));
+            }
+        }
+        safeSetInterval(tick, 500);
+    }
+
+    // ============================================================
+    //  增強模組 2：钓鱼日志染色
+    // ============================================================
+    function initLogColorer() {
+        if (!document.getElementById('fish-log-colors-style')) {
+            const style = document.createElement('style');
+            style.id = 'fish-log-colors-style';
+            style.textContent = `
+                .gold-glow { background: linear-gradient(90deg, #FFD700, #EF989A, #FFD700); background-size: 200% 100%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; animation: shimmer 2s ease-in-out infinite; font-weight: bold; }
+                .green-glow { background: linear-gradient(90deg, #22C55E, #86EFAC, #22C55E); background-size: 200% 100%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; animation: shimmer 1.5s ease-in-out infinite; font-weight: bold; }
+                @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+            `;
+            document.head.appendChild(style);
+            cleanupTasks.push(() => style.remove());
+        }
+        const colorRules = [
+            { word: '鱼讯', color: 'green-glow' }, { word: '传说', color: 'gold-glow' },
+            { word: '不达标', color: '#A7B1BF' }, { word: '达标', color: '#22C55E' },
+            { word: '罕见', color: '#F2C77D' }, { word: '稀有', color: '#92B9F7' },
+            { word: '脱钩逃脱', color: 'red' }
+        ];
+        function processLogs() {
+            document.querySelectorAll('.fishing-log-message:not([data-colored])').forEach(el => {
+                el.dataset.colored = '1';
+                const text = el.textContent || '';
+                for (const rule of colorRules) {
+                    if (text.includes(rule.word)) {
+                        if (rule.color === 'green-glow') el.classList.add('green-glow');
+                        else if (rule.color === 'gold-glow') el.classList.add('gold-glow');
+                        else { el.style.color = rule.color; el.style.fontWeight = 'bold'; }
+                        break;
+                    }
+                }
+            });
+        }
+        const container = document.querySelector('.fishing-log-list') || document.querySelector('.card.mb-md') || document.body;
+        processLogs();
+        const observer = new MutationObserver(processLogs);
+        safeObserve(observer, container, { childList: true, subtree: true });
+    }
+
+    // ============================================================
+    //  增強模組 3：鱼口时间计算 (智能過濾放生/出售)
+    // ============================================================
+    function initCatchTimer() {
+        function isValidCatch(element) {
+            const container = element.closest('.fishing-log-message, .card') || element.parentElement.parentElement;
+            if (!container) return false;
+            const text = container.textContent || '';
+            if (text.includes('已') || text.includes('每日') || text.includes('初识')) return false;
+            return text.includes('鱼');
+        }
+        function calculateTimeDifferences() {
+            const timeElements = Array.from(document.querySelectorAll('.text-xs.text-muted')).filter(el => /\d{4}\/\d{2}\/\d{2}/.test(el.textContent));
+            if (timeElements.length < 2) return;
+
+            for (let i = 0; i < timeElements.length - 1; i++) {
+                const currentTimeElement = timeElements[i];
+                if (currentTimeElement.querySelector('.catch-interval')) continue;
+                if (!isValidCatch(currentTimeElement)) continue;
+
+                let previousTimeElement = null;
+                for (let j = i + 1; j < timeElements.length; j++) {
+                    if (isValidCatch(timeElements[j])) { previousTimeElement = timeElements[j]; break; }
+                }
+
+                if (!previousTimeElement) continue;
+                const currentTimeStr = currentTimeElement.textContent.trim().substring(0, 19);
+                const previousTimeStr = previousTimeElement.textContent.trim().substring(0, 19);
+                const currentTime = new Date(currentTimeStr.replace(/\//g, '-'));
+                const previousTime = new Date(previousTimeStr.replace(/\//g, '-'));
+                if (isNaN(currentTime) || isNaN(previousTime)) continue;
+
+                const diffMinutes = Math.round(Math.abs(currentTime - previousTime) / 1000 / 60);
+                const intervalSpan = document.createElement('span');
+                intervalSpan.className = 'catch-interval text-xs text-muted ml-sm';
+                intervalSpan.textContent = ` │ 鱼口: ${diffMinutes}分钟`;
+                currentTimeElement.appendChild(intervalSpan);
+            }
+        }
+        safeSetInterval(calculateTimeDifferences, 2000);
+        const observer = new MutationObserver(calculateTimeDifferences);
+        safeObserve(observer, document.body, { childList: true, subtree: true });
+    }
+
+    // ============================================================
+    //  增強模組 4：渔轮装备参数增强 (包含商店与背包)
+    // ============================================================
+    function initReelEnhancer() {
+        function enhanceCard(card, isShop = false) {
+            if (card.dataset.reelEnhanced) return;
+            const container = isShop ? card.querySelector('.shop-card-meta') : card.querySelector('.loadout-slot-stats');
+            if (!container) return;
+            if (isShop && container.querySelector('.calc-result-bottom')) return;
+
+            const gearSpan   = [...container.querySelectorAll('span')].find(s => s.textContent.includes('齿比') && /\d/.test(s.textContent));
+            const dragSpan   = [...container.querySelectorAll('span')].find(s => s.textContent.includes('最大摩擦力') && /\d/.test(s.textContent));
+            const speedSpan  = [...container.querySelectorAll('span')].find(s => s.textContent.includes('最大收线速度') && /\d/.test(s.textContent));
+
+            const dragMatch = dragSpan?.textContent.match(/最大摩擦力[\s:]*([\d.]+)/);
+            const speedMatch= speedSpan?.textContent.match(/最大收线速度[\s:]*([\d.]+)/);
+            const gearMatch = gearSpan?.textContent.match(/齿比[\s:]*([\d.]+)/);
+
+            if (!dragMatch && !speedMatch) return;
+
+            let lockValue = null, lineSpeed = null;
+            if (dragMatch) lockValue = (parseFloat(dragMatch[1]) * 1.5).toFixed(1);
+            if (speedMatch && gearMatch) lineSpeed = ((parseFloat(speedMatch[1]) / 2.375) * (parseFloat(gearMatch[1]) / 2.3)).toFixed(2);
+
+            if (lockValue !== null || lineSpeed !== null) {
+                const combinedSpan = document.createElement('span');
+                if (isShop) combinedSpan.className = 'calc-result-bottom';
+                let html = '';
+                if (lockValue !== null) html += `<span style="color:#64748B;font-weight:bold;">锁轮: ${lockValue}</span>`;
+                if (lineSpeed !== null) {
+                    if (lockValue !== null) html += ' <span style="color:var(--color-text-muted);">     </span> ';
+                    html += `<span style="color:#64748B;font-weight:bold;">初始速度: ${lineSpeed}</span>`;
+                }
+                combinedSpan.innerHTML = html;
+                container.appendChild(combinedSpan);
+            }
+            card.dataset.reelEnhanced = '1';
+        }
+        function enhanceAll() {
+            document.querySelectorAll('.loadout-slot').forEach(c => enhanceCard(c, false));
+            document.querySelectorAll('.shop-grid-card').forEach(c => enhanceCard(c, true));
+        }
+        safeSetInterval(enhanceAll, 1000);
+        const observer = new MutationObserver(enhanceAll);
+        safeObserve(observer, document.body, { childList: true, subtree: true, characterData: true });
+    }
+
+    // ============================================================
+    //  增強模組 5：釣場拋偏數值即時顯示
+    // ============================================================
+    function initCastOffsetDisplay() {
+        const STATIC_REGION_EXT = {
+            "青溪镇·村边鱼塘": { castOffset: -1.6, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "水草阴影": -0.4 } },
+            "江陵县·乌沙下游河道": { castOffset: 0.4, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "白鹭湖·芦苇浅湾": { castOffset: -0.9, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -2.2 } },
+            "临川市·旧城运河": { castOffset: -0.2, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "雾岭山·溪流石滩": { castOffset: 1.2, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "回声峡·激流奔段": { castOffset: 2.0, spots: { "白沫线": 0.8, "巨石尾流": 1.2, "掏岸阴影": -1.0 } },
+            "石门水库·大坝深水区": { castOffset: 3.0, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "莲影泽·荷叶湿地": { castOffset: -0.9, spots: { "荷叶缺口": -0.8, "芦苇水道": 0.2, "黑泥深窝": 1.4 } },
+            "玄武坑·采石深潭": { castOffset: 2.4, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "天落库壁": { castOffset: 2.2, spots: { "坝影深槽": 1.6, "机尾回流": 0.8, "岩壁折角": 1.2 } },
+            "南岬镇·河口海湾": { castOffset: 1.2, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "红树湾·潮汐泥滩": { castOffset: 0.6, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "白礁港·防波堤": { castOffset: 3.1, spots: { "堤脚阴影": -0.2, "外拐角": 2.2, "乱石台阶": 0.8 } },
+            "银鳞岛·近海礁盘": { castOffset: 4.6, spots: { "近岸缓坡": -2, "深浅交界": 1.6, "障碍阴影": -0.4 } },
+            "风裂岬·外台": { castOffset: 4.9, spots: { "白浪边线": 1.4, "外台落差": 2.5, "饵鱼阴影带": 0.8 } },
+            "黑礁断面": { castOffset: 5.7, spots: { "断面尖角": 2.9, "暗槽伏击带": 3.3, "泡沫回卷角": 1.2 } },
+            "海杉礁·海带浅礁": { castOffset: 4.0, spots: { "海带水道": 1.0, "礁壁断层": 2.6, "白浪边线": 0.4 } },
+            "玄潮台·海山边缘": { castOffset: 5.6, spots: { "金枪潮线": 3.2, "深层抬升带": 2.8, "强流壁": 1.8 } },
+            "暴线礁·远浪台": { castOffset: 6.2, spots: { "风切潮壁": 3.0, "白浪礁冠": 2.5, "礁根落差": 2.2 } },
+            "渊门峡·岸投端": { castOffset: 7.4, spots: { "峡口唇缘": 3.4, "黑潮门": 2.8, "深回声台阶": 2.4 } },
+            "蓝潮断岸": { castOffset: 2.6, spots: { "断层边线": 1.4, "蓝潮裂流": 2.0, "台地下槽": 2.3 } },
+            "王流海岬": { castOffset: 3.1, spots: { "浪冠角": 2.8, "分潮脊": 3.0, "岬底断崖": 2.5 } },
+            "夜坠海沟缘": { castOffset: 3.8, spots: { "沟缘豁口": 3.2, "黑潮切面": 3.6, "海沟台阶": 3.4 } },
+            "白鹭湖·晨雾船钓之旅": { castOffset: 6.8, spots: {} },
+            "石门水库·深湾船钓之旅": { castOffset: 8.2, spots: {} },
+            "白礁港·近海船钓之旅": { castOffset: 8.4, spots: {} },
+            "蓝潮岬·外缘船钓之旅": { castOffset: 9.3, spots: {} },
+            "银鳞岛·外海船钓之旅": { castOffset: 10.2, spots: {} },
+            "赤湾深槽船钓之旅": { castOffset: 10.9, spots: {} },
+            "巨影海峡船钓之旅": { castOffset: 3.4, spots: {} }
+        };
+
+        const observer = new MutationObserver(() => {
+            const modal = document.querySelector('.modal-content');
+            if (modal && !modal.dataset.offsetInitialized) {
+                modal.dataset.offsetInitialized = 'true';
+                setTimeout(updateOffsetUI, 150);
+            }
+        });
+        safeObserve(observer, document.body, { childList: true, subtree: true });
+
+        const clickHandler = (e) => {
+            if (e.target.closest('.scroll-row .tab')) setTimeout(updateOffsetUI, 50);
+        };
+        safeAddEventListener(document, 'click', clickHandler);
+
+        function updateOffsetUI() {
+            const modal = document.querySelector('.modal-content');
+            if (!modal) return;
+            const titleEl = modal.querySelector('.modal-title');
+            if (!titleEl) return;
+            const regionName = titleEl.textContent.trim();
+            const tabs = modal.querySelectorAll('.scroll-row .tab');
+            const activeTab = modal.querySelector('.tab-active') || tabs[0];
+            const activeSpotName = activeTab ? activeTab.textContent.trim() : "無釣位";
+
+            const regionData = STATIC_REGION_EXT[regionName];
+            if (!regionData) return;
+
+            let spotOffset = regionData.spots[activeSpotName] !== undefined ? regionData.spots[activeSpotName] : 0;
+            const totalOffset = regionData.castOffset + spotOffset;
+
+            const spotHeader = Array.from(modal.querySelectorAll('strong')).find(s => s.textContent.includes('选择钓位'))?.parentElement;
+            if (!spotHeader) return;
+            const existing = modal.querySelector('#total-cast-offset-display');
+            if (existing) existing.remove();
+
+            const display = document.createElement('span');
+            display.id = 'total-cast-offset-display';
+            display.style.cssText = 'margin-left: 10px; font-size: 12px; font-weight: bold; color: #1abc9c; background: rgba(26, 188, 156, 0.1); padding: 2px 6px; border-radius: 4px;';
+            display.textContent = `🎯 抛偏修正: ${totalOffset > 0 ? '+' : ''}${totalOffset.toFixed(1)}m`;
+            spotHeader.appendChild(display);
+        }
+    }
+
+    // ============================================================
+    //  增強模組 6：路亞參數配置動作速度提示
+    // ============================================================
+    function initLureActionSpeedHelper() {
+        const ACTION_SPEEDS = {
+            "steady_surface": "水面系:1.70 m/s", "mid_twitch": "米诺:1.38 m/s",
+            "steady_mid": "摇滚:1.16 | 亮片:1.20 m/s", "bottom_hop": "铅头钩:0.64 m/s"
+        };
+        safeAddEventListener(document, 'click', () => setTimeout(injectSpeedTooltip, 100));
+        safeAddEventListener(document, 'change', (e) => {
+            if (e.target.closest('.detail-stat select')) injectSpeedTooltip();
+        });
+
+        function injectSpeedTooltip() {
+            const modal = document.querySelector('.modal-content');
+            if (!modal) return;
+            const titleEl = modal.querySelector('.modal-title');
+            if (!titleEl || !titleEl.textContent.includes('钓鱼参数配置')) return;
+            const selectEl = modal.querySelector('.detail-stat select');
+            if (!selectEl) return;
+            const actionRow = selectEl.closest('.detail-stat');
+            if (!actionRow) return;
+            const labelSpan = actionRow.querySelector('.detail-stat-label');
+            if (!labelSpan) return;
+
+            const existing = actionRow.querySelector('#lure-action-speed-tip');
+            if (existing) existing.remove();
+
+            const currentAction = selectEl.value;
+            const speedTip = ACTION_SPEEDS[currentAction] || '未知';
+
+            const tipSpan = document.createElement('span');
+            tipSpan.id = 'lure-action-speed-tip';
+            tipSpan.style.cssText = 'margin-left: 8px; font-size: 11px; font-weight: bold; color: #ff4757; background: rgba(255, 71, 87, 0.1); padding: 1px 6px; border-radius: 4px; display: inline-block; vertical-align: middle;';
+            tipSpan.textContent = `${speedTip}`;
+            labelSpan.appendChild(tipSpan);
+        }
+    }
+
+    // ============================================================
+    //  增強模組 7：釣場卡片緊湊化
+    // ============================================================
+    function initCompactRegionCards() {
+        if (!document.getElementById('compact-region-cards-style')) {
+            const style = document.createElement('style');
+            style.id = 'compact-region-cards-style';
+            style.textContent = `
+                .list-item-content .list-item-subtitle{ display: none !important; }
+                .region-list-title-meta--completed { display: none !important; }
+                .list-item-title { font-size: 15px !important; }
+                .region-list-collected-tag { font-size: 10px !important; }
+            `;
+            document.head.appendChild(style);
+            cleanupTasks.push(() => style.remove());
+        }
+        function hideMaxProficiency() {
+            document.querySelectorAll('.fish-proficiency').forEach(prof => {
+                if (prof.textContent.includes('100.0 / 100')) prof.style.display = 'none';
+            });
+        }
+        setTimeout(hideMaxProficiency, 500);
+        const observer = new MutationObserver(hideMaxProficiency);
+        safeObserve(observer, document.body, { childList: true, subtree: true });
+    }
+
+    // ============================================================
+    //  完全體：路亚拟饵推荐 v5.2
+    // ============================================================
+    function initLureRecommendation() {
+        function softcap(x, p) { return x <= 0 ? 0 : x / (x + p); }
+        function clamp(x, a, b) { return Math.min(Math.max(x, a), b); }
+
+        const LURE_TO_ACTION = { "水面系": "steady_surface", "亮片": "steady_mid", "摇滚": "steady_mid", "铅头钩": "bottom_hop", "米诺": "mid_twitch" };
+        const ACTION_BASE_SPEED = { "steady_surface": 1.55, "steady_mid": 1.20, "bottom_hop": 0.72, "mid_twitch": 1.38 };
+        const LURE_TYPE_MODIFIER = { "水面系": 0.15, "亮片": 0.00, "米诺": 0.00, "铅头钩": -0.08, "摇滚": -0.04 };
+        const ACTION_NAME = { "steady_surface": "浅层匀速", "steady_mid": "中层匀速", "bottom_hop": "底层跳动", "mid_twitch": "中层抽动" };
+        const ACTION_LURE_COMPAT = {
+            "steady_surface": { "水面系": 1.0, "亮片": 0.55, "摇滚": 0.50, "铅头钩": 0.30, "米诺": 0.65 },
+            "steady_mid":     { "水面系": 0.60, "亮片": 1.0,  "摇滚": 1.0,  "铅头钩": 0.45, "米诺": 0.72 },
+            "bottom_hop":     { "水面系": 0.25, "亮片": 0.40, "摇滚": 0.35, "铅头钩": 1.0,  "米诺": 0.42 },
+            "mid_twitch":     { "水面系": 0.55, "亮片": 0.68, "摇滚": 0.62, "铅头钩": 0.50, "米诺": 1.0  }
+        };
+        const WATER_LAYER_NAMES = ["表层", "上层", "中层", "下层", "底层"];
+        const ACTION_MAIN_LAYER = { "steady_surface": "表层", "steady_mid": "中层", "bottom_hop": "底层", "mid_twitch": "中层" };
+
+        function calculateRecommendation(preferredLure, agility, alertness, waterLayer) {
+            const action = LURE_TO_ACTION[preferredLure] || "mid_twitch";
+            const vIdeal = Math.max(0.35, ACTION_BASE_SPEED[action] + (LURE_TYPE_MODIFIER[preferredLure] || 0) + clamp(0.70 * (softcap(agility, 4) - 0.44) - 0.55 * (softcap(alertness, 4) - 0.394), -0.25, 0.25));
+
+            const idx1 = WATER_LAYER_NAMES.indexOf(ACTION_MAIN_LAYER[action] || "中层");
+            const idx2 = WATER_LAYER_NAMES.indexOf(waterLayer);
+            const rhoLayer = (idx1 === -1 || idx2 === -1) ? 1.0 : (Math.abs(idx1 - idx2) === 0 ? 1.0 : (Math.abs(idx1 - idx2) === 1 ? 0.6 : 0.25));
+            const layerDesc = rhoLayer >= 1.0 ? '完全匹配' : (rhoLayer >= 0.6 ? '相邻水层' : '跨层不匹配');
+
+            const rhoAction = (ACTION_LURE_COMPAT[action] || {})[preferredLure] || 0.50;
+
+            return {
+                actionName: ACTION_NAME[action],
+                median: vIdeal.toFixed(2),
+                range: `${Math.max(0.1, vIdeal - 0.25).toFixed(2)} ~ ${(vIdeal + 0.25).toFixed(2)}`,
+                rhoLayerDesc: layerDesc,
+                rhoAction: (rhoAction * 100).toFixed(0) + '%'
+            };
+        }
+
+        let currentHash = null;
+        let lureTimer = null;
+        cleanupTasks.push(() => clearTimeout(lureTimer));
+
+        function runInject() {
+            const labels = Array.from(document.querySelectorAll('span.detail-stat-label, .stat-label'));
+            const targetLabel = labels.find(s => s.textContent.includes('偏好拟饵'));
+            if (!targetLabel) return;
+
+            const container = targetLabel.closest('.detail-stat, .stat-row');
+            const valEl = targetLabel.nextElementSibling;
+            if (!valEl) return;
+            const preferredLure = valEl.textContent.trim();
+
+            const stats = { agility: 5.0, alertness: 4.0, waterLayer: "中层" };
+            document.querySelectorAll('.fish-stat-bar-row, .detail-stat, .stat-row').forEach(row => {
+                const text = row.textContent || '';
+                const vEl = row.querySelector('.fish-stat-bar-value, .detail-stat-value, .stat-value');
+                if (!vEl) return;
+                const v = parseFloat(vEl.textContent.trim());
+                if (text.includes('敏捷') && !isNaN(v)) stats.agility = v;
+                if (text.includes('警觉') && !isNaN(v)) stats.alertness = v;
+                if (text.includes('水层')) stats.waterLayer = vEl.textContent.trim();
+            });
+
+            const rec = calculateRecommendation(preferredLure, stats.agility, stats.alertness, stats.waterLayer);
+
+            if (document.getElementById('lure-rec-block')) document.getElementById('lure-rec-block').remove();
+            const div = document.createElement('div');
+            div.id = 'lure-rec-block';
+            div.style.cssText = 'border-left:4px solid var(--color-primary); margin-top:8px; padding:8px; background:rgba(0,0,0,0.03); font-size:0.9em;';
+            div.innerHTML = `
+                <div style="font-weight:bold; margin-bottom:4px;">推薦動作: ${rec.actionName}</div>
+                <div style="margin-bottom:2px;">水層匹配: ${rec.rhoLayerDesc}</div>
+                <div style="margin-bottom:2px;">動作兼容: ${rec.rhoAction}</div>
+                <div style="margin-bottom:2px;">中: ${rec.median} m/s  ${rec.range} m/s</div>
+            `;
+            container.parentNode.insertBefore(div, container.nextSibling);
+        }
+
+        const observer = new MutationObserver(() => {
+            const labels = Array.from(document.querySelectorAll('span.detail-stat-label, .stat-label'));
+            if (labels.some(l => l.textContent.includes('偏好拟饵'))) {
+                const nameEl = document.querySelector('.fish-detail-section .detail-title, .modal-title, .fish-name');
+                const hash = (nameEl ? nameEl.textContent.trim() : 'Unknown') + "_LURE_V5";
+                if (currentHash !== hash) {
+                    currentHash = hash;
+                    clearTimeout(lureTimer);
+                    lureTimer = setTimeout(runInject, 300);
+                }
+            } else {
+                currentHash = null;
+            }
+        });
+        safeObserve(observer, document.body, { childList: true, subtree: true });
+    }
+
+    // ============================================================
+    //  主程式執行入口
+    // ============================================================
+    async function boot() {
+        console.log('🚀 開始初始化 LazyFisher 核心 Payload...');
+
+        await loadData();
+
+        addFloatingButtons();
+        safeSetInterval(runLogic, 2000); 
+
+        initSmartContrastCurrency();
+        initLureSoftnessModule();
+        initLogColorer();
+        initCatchTimer();
+        initReelEnhancer();
+        initLureRecommendation();
+        initCastOffsetDisplay();
+        initLureActionSpeedHelper();
+        initCompactRegionCards();
+
+        console.log('✨ LazyFisher Payload 啟動完畢！熱更新就緒。');
+    }
+
+    if (document.readyState === 'loading') {
+        const bootHandler = () => boot();
+        document.addEventListener('DOMContentLoaded', bootHandler);
+        cleanupTasks.push(() => document.removeEventListener('DOMContentLoaded', bootHandler));
+    } else {
+        boot();
+    }
+
+})();
