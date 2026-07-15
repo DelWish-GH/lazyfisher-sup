@@ -1136,7 +1136,7 @@
                             if (tabName.includes('岸钓')) {
                                 const clickHelper = (elem) => {
                                     ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                                        elem.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                                        elem.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true }));
                                     });
                                 };
 
