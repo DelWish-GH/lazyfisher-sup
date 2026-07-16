@@ -133,7 +133,9 @@
 
                 let w = 0;
                 const weightStr = info['重量'] || info['最大重量'] || info['最小重量'] || '0g';
-                const matches = [...weightStr.matchAll(/([\d.]+)\s*(kg|g)/gi)];
+                // 移除重量字串中的逗號，避免千位符導致正則匹配斷裂 (例如 1,500kg 會變成 1 和 500kg 導致誤判)
+                const cleanWeightStr = weightStr.replace(/,/g, '');
+                const matches = [...cleanWeightStr.matchAll(/([\d.]+)\s*(kg|g)/gi)];
 
                 if (matches.length > 0) {
                     const lastMatch = matches[matches.length - 1];
@@ -157,7 +159,7 @@
             const dA = a.__sortData || { layer: '', bait: '', lure: '', w: 0 };
             const dB = b.__sortData || { layer: '', bait: '', lure: '', w: 0 };
 
-            const order = { '上层': 1, '中层': 2, '下层': 3 };
+            const order = { '表层': 0, '上层': 1, '中层': 2, '下层': 3, '底层': 4 };
             if ((order[dA.layer]||9) !== (order[dB.layer]||9)) return (order[dA.layer]||9) - (order[dB.layer]||9);
 
             const valA = IS_BAIT_MODE ? dA.bait : dA.lure;
@@ -812,7 +814,7 @@
                         });
 
                         const importExportBtn = Array.from(document.querySelectorAll('.page-wrapper button, .main-content button'))
-                                                     .find(b => b.innerText.includes('导入导出'));
+                                                                     .find(b => b.innerText.includes('导入导出'));
                         if (importExportBtn) {
                             importExportBtn.click();
                             await new Promise(r => setTimeout(r, 600)); 
@@ -1117,7 +1119,7 @@
                         };
 
                         const regionTabs = Array.from(document.querySelectorAll('.scroll-row.mb-md .tab'))
-                                                .filter(t => t.innerText.includes('岸钓') || t.innerText.includes('船钓'));
+                                                        .filter(t => t.innerText.includes('岸钓') || t.innerText.includes('船钓'));
 
                         if (regionTabs.length === 0) {
                             statusText.innerText = "❌ 找不到岸釣/船釣標籤";
